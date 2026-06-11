@@ -142,6 +142,289 @@ function currencyrate($code)
     // Return the results.
     return $response[0]['rate'];
 }
+
+/**
+ * Searches flights via the BookingExpert SSE API.
+ *
+ * @param array $params {
+ *   'origin'          => string  IATA origin code
+ *   'destination'     => string  IATA destination code
+ *   'departure_date'  => string  Y-m-d
+ *   'return_date'     => string  Y-m-d (empty for one-way)
+ *   'adults'          => int
+ *   'children'        => int
+ *   'infants'         => int
+ *   'class_type'      => string  economy|business|first
+ *   'currency'        => string  user-selected currency code
+ *   'type'            => string  oneway|round
+ *   'user_id'         => string
+ * }
+ * @return array Flights in the standard segments format used by the rest of the app.
+ */
+function search_bookingexpert($params)
+{
+    $origin      = strtoupper($params['origin']);
+    $destination = strtoupper($params['destination']);
+    $dep_date    = $params['departure_date'];
+    $ret_date    = isset($params['return_date']) ? $params['return_date'] : '';
+    $adults      = intval($params['adults'] ?: 1);
+    $children    = intval($params['children'] ?: 0);
+    $infants     = intval($params['infants'] ?: 0);
+    $trip_type   = (isset($params['type']) && $params['type'] === 'round') ? 'round' : 'oneway';
+    $currency    = $params['currency'];
+    $user_id     = isset($params['user_id']) ? $params['user_id'] : '';
+
+    // Map class_type to BookingExpert cabin code: 1=Economy, 2=Business, 3=First
+    $cabin_map = ['economy' => '1', 'business' => '2', 'first' => '3'];
+    $cabin_code = isset($cabin_map[$params['class_type']]) ? $cabin_map[$params['class_type']] : '1';
+
+    // Build PassengerTypeQuantity
+    $pax = [];
+    if ($adults > 0)   $pax[] = ['Code' => 'ADT', 'Quantity' => $adults];
+    if ($children > 0) $pax[] = ['Code' => 'CHD', 'Quantity' => $children];
+    if ($infants > 0)  $pax[] = ['Code' => 'INF', 'Quantity' => $infants];
+
+    // Build OriginDestinationInformation
+    $odi = [];
+    $odi[] = [
+        'RPH'                  => '1',
+        'DepartureDateTime'    => $dep_date . 'T00:00:00',
+        'OriginLocation'       => ['LocationCode' => $origin],
+        'DestinationLocation'  => ['LocationCode' => $destination],
+        'TPA_Extensions'       => [
+            'CabinPref' => ['PreferLevel' => 'Preferred', 'Cabin' => $cabin_code]
+        ]
+    ];
+
+    // Add return leg for round trips
+    if ($trip_type === 'round' && !empty($ret_date)) {
+        $odi[] = [
+            'RPH'                  => '2',
+            'DepartureDateTime'    => $ret_date . 'T00:00:00',
+            'OriginLocation'       => ['LocationCode' => $destination],
+            'DestinationLocation'  => ['LocationCode' => $origin],
+            'TPA_Extensions'       => [
+                'CabinPref' => ['PreferLevel' => 'Preferred', 'Cabin' => $cabin_code]
+            ]
+        ];
+    }
+
+    $journey_type = ($trip_type === 'round') ? 2 : 1;
+
+    $query_params = [
+        'JourneyType'                    => $journey_type,
+        'PassengerTypeQuantity'          => json_encode($pax),
+        'OriginDestinationInformation'   => json_encode($odi),
+    ];
+
+    $sse_url = 'https://server.bookingexpert.us/api/v2/b2c/flight/search/sse';
+    $full_url = $sse_url . '?' . http_build_query($query_params);
+
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL            => $full_url,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_HTTPGET        => true,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_TIMEOUT        => 30,
+        CURLOPT_HTTPHEADER     => [
+            'Accept: text/event-stream',
+            'Cache-Control: no-cache',
+        ],
+    ]);
+
+    $response = curl_exec($ch);
+    $curl_err  = curl_error($ch);
+    curl_close($ch);
+
+    if (!$response || $curl_err) {
+        return [];
+    }
+
+    // Parse SSE lines
+    $raw_flights = [];
+    foreach (explode("\n", $response) as $line) {
+        $line = trim($line);
+        if (strpos($line, 'data:') === 0) {
+            $json = trim(substr($line, 5));
+            $decoded = json_decode($json, true);
+            if (json_last_error() === JSON_ERROR_NONE && isset($decoded['flight_id'])) {
+                $raw_flights[] = $decoded;
+            }
+        }
+    }
+
+    if (empty($raw_flights)) {
+        return [];
+    }
+
+    // Sort cheapest first
+    usort($raw_flights, function ($a, $b) {
+        $pa = isset($a['fare']['payable']) ? floatval($a['fare']['payable']) : 0;
+        $pb = isset($b['fare']['payable']) ? floatval($b['fare']['payable']) : 0;
+        return $pa <=> $pb;
+    });
+
+    // Map to internal segment format
+    $result = [];
+
+    foreach ($raw_flights as $flight) {
+        $fare          = isset($flight['fare']) ? $flight['fare'] : [];
+        $raw_currency  = isset($fare['currency']) ? $fare['currency'] : 'USD';
+        $raw_price     = isset($fare['payable'])  ? floatval($fare['payable'])  : 0;
+        $adult_raw     = isset($fare['adult_fare'])   ? floatval($fare['adult_fare'])   : $raw_price;
+        $child_raw     = isset($fare['child_fare'])   ? floatval($fare['child_fare'])   : 0;
+        $infant_raw    = isset($fare['infant_fare'])  ? floatval($fare['infant_fare'])  : 0;
+        $refundable    = isset($flight['refundable']) ? $flight['refundable'] : false;
+
+        // Currency conversion
+        $from_rate = floatval(currencyrate($raw_currency));
+        $to_rate   = floatval(currencyrate($currency));
+        if ($from_rate <= 0) $from_rate = 1;
+        if ($to_rate   <= 0) $to_rate   = 1;
+
+        $conv_price  = ceil($raw_price  / $from_rate) * $to_rate;
+        $conv_adult  = ceil($adult_raw  / $from_rate) * $to_rate;
+        $conv_child  = ceil($child_raw  / $from_rate) * $to_rate;
+        $conv_infant = ceil($infant_raw / $from_rate) * $to_rate;
+
+        // Build booking_data (preserve full flight payload for booking step)
+        $booking_data = [
+            'flight_id'   => $flight['flight_id'],
+            'fare'        => $fare,
+            'raw_flight'  => $flight,
+        ];
+
+        // Build onward segments from flight legs
+        $onward_legs  = isset($flight['segments'])          ? $flight['segments']          : [];
+        $return_legs  = isset($flight['return_segments'])   ? $flight['return_segments']   : [];
+
+        // Determine airline/logo from first leg
+        $first_leg     = !empty($onward_legs) ? $onward_legs[0] : [];
+        $airline_name  = isset($first_leg['airline_name'])  ? $first_leg['airline_name']  : (isset($flight['airline_name'])  ? $flight['airline_name']  : '');
+        $airline_code  = isset($first_leg['airline_code'])  ? $first_leg['airline_code']  : (isset($flight['airline_code'])  ? $flight['airline_code']  : '');
+        $airline_logo  = isset($first_leg['airline_logo'])  ? $first_leg['airline_logo']  : (isset($flight['airline_logo'])  ? $flight['airline_logo']  : '');
+        $flight_no     = isset($first_leg['flight_number']) ? $first_leg['flight_number'] : (isset($flight['flight_number']) ? $flight['flight_number'] : $flight['flight_id']);
+        $class_label   = isset($first_leg['cabin'])         ? $first_leg['cabin']         : ($params['class_type'] ?? 'economy');
+        $baggage       = isset($first_leg['baggage'])       ? $first_leg['baggage']       : (isset($flight['baggage'])  ? $flight['baggage']  : '');
+        $cabin_bag     = isset($first_leg['cabin_baggage']) ? $first_leg['cabin_baggage'] : '';
+
+        // Build a segment object from a leg array
+        $make_segment = function ($leg, $seg_dep_date, $seg_arr_date) use (
+            $airline_name, $airline_code, $airline_logo, $flight_no,
+            $class_label, $baggage, $cabin_bag,
+            $currency, $raw_currency,
+            $conv_price, $conv_adult, $conv_child, $conv_infant,
+            $raw_price, $refundable, $booking_data, $flight
+        ) {
+            $dep_airport  = isset($leg['departure_airport']) ? $leg['departure_airport'] : (isset($leg['from']) ? $leg['from'] : '');
+            $dep_code     = isset($leg['departure_code'])    ? $leg['departure_code']    : $dep_airport;
+            $arr_airport  = isset($leg['arrival_airport'])   ? $leg['arrival_airport']   : (isset($leg['to'])   ? $leg['to']   : '');
+            $arr_code     = isset($leg['arrival_code'])      ? $leg['arrival_code']      : $arr_airport;
+            $dep_time     = isset($leg['departure_time'])    ? $leg['departure_time']    : '';
+            $arr_time     = isset($leg['arrival_time'])      ? $leg['arrival_time']      : '';
+            $duration     = isset($leg['duration'])          ? $leg['duration']          : '';
+            $leg_airline  = isset($leg['airline_name'])      ? $leg['airline_name']      : $airline_name;
+            $leg_logo     = isset($leg['airline_logo'])      ? $leg['airline_logo']      : $airline_logo;
+            $leg_no       = isset($leg['flight_number'])     ? $leg['flight_number']     : $flight_no;
+
+            return (object)[
+                'img'                => $leg_logo,
+                'flight_no'          => $leg_no,
+                'airline'            => $leg_airline,
+                'class'              => $class_label,
+                'baggage'            => $baggage,
+                'cabin_baggage'      => $cabin_bag,
+                'departure_airport'  => $dep_airport,
+                'departure_time'     => $dep_time,
+                'departure_date'     => $seg_dep_date,
+                'departure_code'     => $dep_code,
+                'arrival_airport'    => $arr_airport,
+                'arrival_date'       => $seg_arr_date,
+                'arrival_time'       => $arr_time,
+                'arrival_code'       => $arr_code,
+                'duration_time'      => $duration,
+                'total_duration'     => $duration,
+                'currency'           => $currency,
+                'actual_currency'    => $raw_currency,
+                'actual_price'       => (string)$raw_price,
+                'price'              => number_format((float)$conv_price,  2, '.', ''),
+                'adult_price'        => number_format((float)$conv_adult,  2, '.', ''),
+                'adult_markup_price' => number_format((float)$conv_adult,  2, '.', ''),
+                'child_price'        => number_format((float)$conv_child,  2, '.', ''),
+                'child_markup_price' => number_format((float)$conv_child,  2, '.', ''),
+                'infant_price'       => number_format((float)$conv_infant, 2, '.', ''),
+                'infant_markup_price'=> number_format((float)$conv_infant, 2, '.', ''),
+                'markup_percentage'  => '0',
+                'booking_data'       => $booking_data,
+                'redirect_url'       => '',
+                'refundable'         => $refundable ? '1' : '0',
+                'supplier'           => 'bookingexpert',
+                'type'               => (count($GLOBALS['_be_return_legs'] ?? []) > 0) ? 'round' : 'oneway',
+                'color'              => '#1a73e8',
+            ];
+        };
+
+        // Build onward segment array
+        $onward_seg = [];
+        if (!empty($onward_legs)) {
+            foreach ($onward_legs as $leg) {
+                $leg_dep = isset($leg['departure_date']) ? $leg['departure_date'] : $dep_date;
+                $leg_arr = isset($leg['arrival_date'])   ? $leg['arrival_date']   : $dep_date;
+                $onward_seg[] = $make_segment($leg, $leg_dep, $leg_arr);
+            }
+        } else {
+            // Fallback: use flight-level fields when no legs provided
+            $fallback_leg = [
+                'departure_airport' => isset($flight['departure_airport']) ? $flight['departure_airport'] : $origin,
+                'departure_code'    => isset($flight['departure_code'])    ? $flight['departure_code']    : $origin,
+                'arrival_airport'   => isset($flight['arrival_airport'])   ? $flight['arrival_airport']   : $destination,
+                'arrival_code'      => isset($flight['arrival_code'])      ? $flight['arrival_code']      : $destination,
+                'departure_time'    => isset($flight['departure_time'])    ? $flight['departure_time']    : '',
+                'arrival_time'      => isset($flight['arrival_time'])      ? $flight['arrival_time']      : '',
+                'duration'          => isset($flight['duration'])          ? $flight['duration']          : '',
+                'airline_name'      => $airline_name,
+                'airline_logo'      => $airline_logo,
+                'flight_number'     => $flight_no,
+            ];
+            $onward_seg[] = $make_segment($fallback_leg, $dep_date, $dep_date);
+        }
+
+        if ($trip_type === 'round') {
+            $GLOBALS['_be_return_legs'] = $return_legs;
+            $return_seg = [];
+            if (!empty($return_legs)) {
+                foreach ($return_legs as $leg) {
+                    $leg_dep = isset($leg['departure_date']) ? $leg['departure_date'] : $ret_date;
+                    $leg_arr = isset($leg['arrival_date'])   ? $leg['arrival_date']   : $ret_date;
+                    $return_seg[] = $make_segment($leg, $leg_dep, $leg_arr);
+                }
+            } else {
+                $fallback_ret = [
+                    'departure_airport' => $destination,
+                    'departure_code'    => $destination,
+                    'arrival_airport'   => $origin,
+                    'arrival_code'      => $origin,
+                    'departure_time'    => isset($flight['return_departure_time']) ? $flight['return_departure_time'] : '',
+                    'arrival_time'      => isset($flight['return_arrival_time'])   ? $flight['return_arrival_time']   : '',
+                    'duration'          => isset($flight['return_duration'])       ? $flight['return_duration']       : '',
+                    'airline_name'      => $airline_name,
+                    'airline_logo'      => $airline_logo,
+                    'flight_number'     => $flight_no,
+                ];
+                $return_seg[] = $make_segment($fallback_ret, $ret_date, $ret_date);
+            }
+            $GLOBALS['_be_return_legs'] = [];
+
+            $result[] = ['segments' => [$onward_seg, $return_seg]];
+        } else {
+            $result[] = ['segments' => [$onward_seg]];
+        }
+    }
+
+    return $result;
+}
 /**
  * Saves a booking record to the database.
  *
@@ -957,6 +1240,29 @@ $router->post('flights/search', function () {
     } else {
         $data = [];
     }
+
+    // ---- BookingExpert SSE API Integration ----
+    $be_params = [
+        'origin'         => ($_POST['origin'])         ? strtoupper($_POST['origin'])         : '',
+        'destination'    => ($_POST['destination'])    ? strtoupper($_POST['destination'])    : '',
+        'departure_date' => $_POST['departure_date'],
+        'return_date'    => isset($_POST['return_date']) ? $_POST['return_date'] : '',
+        'adults'         => $adults,
+        'children'       => $children,
+        'infants'        => $infants,
+        'class_type'     => isset($_POST['class_type']) ? $_POST['class_type'] : 'economy',
+        'currency'       => isset($_POST['currency'])   ? $_POST['currency']   : 'USD',
+        'type'           => $checktrip,
+        'user_id'        => isset($_POST['user_id'])    ? $_POST['user_id']    : '',
+    ];
+
+    $be_results = search_bookingexpert($be_params);
+
+    if (!empty($be_results)) {
+        $data = array_merge($data, $be_results);
+    }
+    // ---- End BookingExpert Integration ----
+
     echo json_encode($data);
 });
 
