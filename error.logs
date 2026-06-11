@@ -1,0 +1,29 @@
+[21-Feb-2026 08:07:06 UTC] PHP Deprecated:  strtolower(): Passing null to parameter #1 ($string) of type string is deprecated in D:\root\ollotrip\App\Views\Header.php on line 190
+[21-Feb-2026 08:08:56 UTC] PHP Warning:  Attempt to read property "segments" on string in D:\root\ollotrip\App\Views\Flights\Flights.php on line 75
+[21-Feb-2026 08:08:56 UTC] PHP Warning:  Trying to access array offset on value of type null in D:\root\ollotrip\App\Views\Flights\Flights.php on line 75
+[21-Feb-2026 08:08:56 UTC] PHP Fatal error:  Uncaught TypeError: count(): Argument #1 ($value) must be of type Countable|array, null given in D:\root\ollotrip\App\Views\Flights\Flights.php:75
+Stack trace:
+#0 D:\root\ollotrip\App\Views\Main.php(4): require_once()
+#1 D:\root\ollotrip\index.php(303): include('D:\\root\\ollotri...')
+#2 D:\root\ollotrip\App\Controllers\FlightsController.php(204): views(Array, 'Flights/Flights')
+#3 [internal function]: {closure}('flights', 'jed/del/return/...')
+#4 D:\root\ollotrip\App\Lib\router.php(298): call_user_func_array(Object(Closure), Array)
+#5 D:\root\ollotrip\App\Lib\router.php(248): AppRouter\Router->call(Object(Closure), Array)
+#6 D:\root\ollotrip\App\Lib\router.php(309): AppRouter\Router->dispatch('GET', '/flights/jed/de...')
+#7 D:\root\ollotrip\index.php(463): AppRouter\Router->dispatchGlobal()
+#8 {main}
+  thrown in D:\root\ollotrip\App\Views\Flights\Flights.php on line 75
+[21-Feb-2026 08:26:47 UTC] PHP Warning:  Attempt to read property "segments" on string in D:\root\ollotrip\App\Views\Flights\Flights.php on line 75
+[21-Feb-2026 08:26:47 UTC] PHP Warning:  Trying to access array offset on value of type null in D:\root\ollotrip\App\Views\Flights\Flights.php on line 75
+[21-Feb-2026 08:26:47 UTC] PHP Fatal error:  Uncaught TypeError: count(): Argument #1 ($value) must be of type Countable|array, null given in D:\root\ollotrip\App\Views\Flights\Flights.php:75
+Stack trace:
+#0 D:\root\ollotrip\App\Views\Main.php(4): require_once()
+#1 D:\root\ollotrip\index.php(303): include('D:\\root\\ollotri...')
+#2 D:\root\ollotrip\App\Controllers\FlightsController.php(206): views(Array, 'Flights/Flights')
+#3 [internal function]: {closure}('flights', 'jed/del/return/...')
+#4 D:\root\ollotrip\App\Lib\router.php(298): call_user_func_array(Object(Closure), Array)
+#5 D:\root\ollotrip\App\Lib\router.php(248): AppRouter\Router->call(Object(Closure), Array)
+#6 D:\root\ollotrip\App\Lib\router.php(309): AppRouter\Router->dispatch('GET', '/flights/jed/de...')
+#7 D:\root\ollotrip\index.php(463): AppRouter\Router->dispatchGlobal()
+#8 {main}
+  thrown in D:\root\ollotrip\App\Views\Flights\Flights.php on line 75

@@ -1,0 +1,4 @@
+[21-Feb-2026 08:31:48 UTC] PHP Parse error:  syntax error, unexpected token "if" in D:\root\ollotrip\api\routes\Flights.php on line 300
+[21-Feb-2026 08:39:09 UTC] PHP Warning:  Undefined array key "endpoint" in D:\root\ollotrip\api\routes\Flights.php on line 192
+[21-Feb-2026 09:14:44 UTC] PHP Warning:  Undefined property: stdClass::$segments in D:\root\ollotrip\api\routes\Flights.php on line 781
+[21-Feb-2026 09:14:44 UTC] PHP Warning:  foreach() argument must be of type array|object, null given in D:\root\ollotrip\api\routes\Flights.php on line 781
